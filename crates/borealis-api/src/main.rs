@@ -12,10 +12,7 @@ async fn main() -> anyhow::Result<()> {
 
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
 
-    let skip_tls = std::env::var("SKIP_TLS")
-        .unwrap_or_default()
-        .to_lowercase()
-        == "true";
+    let skip_tls = std::env::var("SKIP_TLS").unwrap_or_default().to_lowercase() == "true";
 
     let pool = sqlx::PgPool::connect(&database_url).await?;
     borealis_db::run_migrations(&pool).await?;
