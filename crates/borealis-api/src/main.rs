@@ -1,4 +1,5 @@
 use axum::{Router, routing::get};
+use axum_server::tls_rustls::RustlsConfig;
 use tower_http::{cors::CorsLayer, services::ServeDir};
 
 mod error;
@@ -10,6 +11,11 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+
+    let skip_tls = std::env::var("SKIP_TLS")
+        .unwrap_or_default()
+        .to_lowercase()
+        == "true";
 
     let pool = sqlx::PgPool::connect(&database_url).await?;
     borealis_db::run_migrations(&pool).await?;
@@ -25,9 +31,30 @@ async fn main() -> anyhow::Result<()> {
         .layer(CorsLayer::permissive())
         .with_state(pool);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
-    tracing::info!("listening on {}", listener.local_addr()?);
-    axum::serve(listener, app).await?;
+    if skip_tls {
+        let addr = "0.0.0.0:3000".parse().unwrap();
+        tracing::info!("TLS disabled — listening on http://{}", addr);
+        axum_server::bind(addr)
+            .serve(app.into_make_service())
+            .await
+            .unwrap();
+    } else {
+        let cert_path = std::env::var("TLS_CERT_PATH")
+            .expect("TLS_CERT_PATH must be set when SKIP_TLS is not true");
+        let key_path = std::env::var("TLS_KEY_PATH")
+            .expect("TLS_KEY_PATH must be set when SKIP_TLS is not true");
+
+        let config = RustlsConfig::from_pem_file(&cert_path, &key_path)
+            .await
+            .expect("failed to load TLS certificate — check TLS_CERT_PATH and TLS_KEY_PATH");
+
+        let addr = "0.0.0.0:443".parse().unwrap();
+        tracing::info!("TLS enabled — listening on https://{}", addr);
+        axum_server::bind_rustls(addr, config)
+            .serve(app.into_make_service())
+            .await
+            .unwrap();
+    }
 
     Ok(())
 }

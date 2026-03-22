@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 borealis-db = { path = "../borealis-db" }
 axum = { workspace = true }
+axum-server = { workspace = true }
 tokio = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
