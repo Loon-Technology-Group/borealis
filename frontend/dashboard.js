@@ -598,6 +598,11 @@
     }).observe(grid);
   }
 
+  function chartsReady() {
+    var sizes = calcSizes();
+    return sizes.kp.width > 0 && sizes.kp.height > 0;
+  }
+
   // ── 11. Init ───────────────────────────────────────────
 
   function init() {
@@ -619,16 +624,17 @@
         });
       });
 
+    setupResizeObservers();
+
     fetchAll(state.window)
       .then(function (data) {
         renderStatus(data.latest);
         state.kpData = data.kp;
         state.bzData = data.bz;
         state.windData = data.wind;
-        requestAnimationFrame(function () {
+        if (chartsReady()) {
           buildAllCharts();
-          setupResizeObservers();
-        });
+        }
       })
       .catch(function (err) {
         console.error("Initial data load failed:", err);
