@@ -1,0 +1,17 @@
+[package]
+name = "borealis-api"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+borealis-db = { path = "../borealis-db" }
+axum = { workspace = true }
+tokio = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+sqlx = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+dotenvy = { workspace = true }
+anyhow = { workspace = true }

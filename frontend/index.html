@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Borealis — Space Weather</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <div class="header-left">
+      <img src="borealis_logo.png" alt="Borealis" class="site-logo">
+      <span class="site-title">BOREALIS</span>
+    </div>
+    <div class="header-center">
+      <div class="window-selector">
+        <button data-window="1h">1h</button>
+        <button data-window="3h">3h</button>
+        <button data-window="6h">6h</button>
+        <button data-window="12h">12h</button>
+        <button data-window="24h" class="active">24h</button>
+        <button data-window="7d">7d</button>
+      </div>
+    </div>
+    <div class="header-right">
+      <span id="last-updated" class="last-updated"></span>
+      <span class="refresh-countdown"></span>
+      <button class="refresh-toggle" title="Toggle auto-refresh"></button>
+      <button class="theme-toggle" title="Toggle light/dark mode">◑</button>
+    </div>
+  </header>
+
+  <div class="status-strip">
+    <div class="stat-block" id="stat-kp">
+      <div class="stat-value">—</div>
+      <div class="stat-label">KP Index</div>
+    </div>
+    <div class="stat-block" id="stat-bz">
+      <div class="stat-value">—</div>
+      <div class="stat-label">Bz</div>
+    </div>
+    <div class="stat-block" id="stat-wind">
+      <div class="stat-value">—</div>
+      <div class="stat-label">Solar Wind</div>
+    </div>
+  </div>
+
+  <main class="chart-grid">
+    <div class="chart-panel chart-kp">
+      <div class="chart-title">Planetary KP Index</div>
+      <div id="chart-kp-container"></div>
+    </div>
+    <div class="chart-column-right">
+      <div class="chart-panel chart-bz">
+        <div class="chart-title">Bz (nT) — IMF North/South Component</div>
+        <div id="chart-bz-container"></div>
+      </div>
+      <div class="chart-panel chart-wind">
+        <div class="chart-title">Solar Wind — Speed &amp; Density</div>
+        <div id="chart-wind-container"></div>
+      </div>
+    </div>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
+  <script src="dashboard.js"></script>
+</body>
+</html>

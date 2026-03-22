@@ -1,0 +1,5 @@
+CREATE TABLE kp (
+    id BIGSERIAL PRIMARY KEY,
+    time_tag TIMESTAMPTZ NOT NULL UNIQUE,
+    k_index REAL NOT NULL
+);

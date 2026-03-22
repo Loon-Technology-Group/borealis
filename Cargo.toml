@@ -1,0 +1,21 @@
+[workspace]
+members = [
+    "crates/borealis-db",
+    "crates/borealis-collector",
+    "crates/borealis-api",
+]
+resolver = "2"
+
+[workspace.dependencies]
+tokio = { version = "1.49.0", features = ["full"] }
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "postgres", "chrono"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.13.2", features = ["json"] }
+dotenvy = "0.15"
+axum = "0.8"
+tower-http = { version = "0.6", features = ["fs", "cors"] }
+anyhow = "1"

@@ -1,0 +1,30 @@
+# === Rust-specific ignores ===
+/target/                 # Build output
+/target
+**/*.rs.bk               # Backup files
+
+# === Claude Settings ===
+/.claude/
+/.claude
+
+# === Example JSON Files ===
+/examples/
+
+# === ENV ===
+*.env
+
+# === Dependency cache (optional) ===
+/.cargo/
+/vendor/
+
+# === OS / misc ===
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.tar
+
+# === Test output / coverage tools ===
+/coverage/
+/lcov.info
+/target/debug/deps/*_test*

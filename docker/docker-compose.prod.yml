@@ -1,0 +1,41 @@
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: borealis
+      POSTGRES_USER: borealis
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # No ports: intentionally internal only
+
+  collector:
+    image: loontechcraig/borealis-collector:latest
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    environment:
+      DATABASE_URL: postgresql://borealis:${POSTGRES_PASSWORD}@postgres:5432/borealis
+      USER_AGENT: ${USER_AGENT}
+      KP_URL: ${KP_URL}
+      BZ_URL: ${BZ_URL}
+      WIND_URL: ${WIND_URL}
+
+  api:
+    image: loontechcraig/borealis-api:latest
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    ports:
+      - "3000:3000"  # Update to 443:443 once TLS is wired in
+    volumes:
+      - ./certs:/certs:ro
+      - ./frontend:/app/frontend:ro
+    environment:
+      DATABASE_URL: postgresql://borealis:${POSTGRES_PASSWORD}@postgres:5432/borealis
+      TLS_CERT_PATH: /certs/origin.pem
+      TLS_KEY_PATH: /certs/origin.key
+
+volumes:
+  pgdata:
