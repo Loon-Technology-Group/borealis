@@ -435,8 +435,12 @@
 
   // Full destroy + rebuild (used on first load and theme toggle)
   function buildAllCharts() {
-    destroyCharts();
     var sizes = calcSizes();
+    if (sizes.kp.width === 0 || sizes.kp.height === 0) {
+      return false;
+    }
+
+    destroyCharts();
 
     if (state.kpData && state.kpData.length > 0) {
       state.charts.kp = buildKpChart(
@@ -474,6 +478,7 @@
         state.windData ? "No data for selected window" : "Unable to load data",
       );
     }
+    return true;
   }
 
   // Update data in-place without rebuilding (used on window change + auto-refresh)
@@ -598,11 +603,6 @@
     }).observe(grid);
   }
 
-  function chartsReady() {
-    var sizes = calcSizes();
-    return sizes.kp.width > 0 && sizes.kp.height > 0;
-  }
-
   // ── 11. Init ───────────────────────────────────────────
 
   function init() {
@@ -632,9 +632,7 @@
         state.kpData = data.kp;
         state.bzData = data.bz;
         state.windData = data.wind;
-        if (chartsReady()) {
-          buildAllCharts();
-        }
+        buildAllCharts();
       })
       .catch(function (err) {
         console.error("Initial data load failed:", err);
