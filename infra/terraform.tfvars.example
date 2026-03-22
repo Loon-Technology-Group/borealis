@@ -1,0 +1,19 @@
+# Copy to terraform.tfvars and fill in values
+# terraform.tfvars is gitignored
+
+project_name         = "borealis"
+aws_region           = "us-east-2"
+instance_type        = "t4g.small"
+
+# Find the latest Debian 12 arm64 AMI for us-east-2:
+# AWS Console → EC2 → AMIs → Public images
+# Filter: Owner=136693071363 (Debian), Architecture=arm64, Name=debian-12-*
+ami_id               = "ami-xxxxxxxxxxxxxxxxx"
+
+# Cloudflare
+cloudflare_api_token = "your-cloudflare-api-token"
+cloudflare_zone_id   = "your-zone-id"
+
+# Generate at: https://login.tailscale.com/admin/settings/keys
+# Use a single-use, ephemeral key
+tailscale_auth_key   = "tskey-auth-xxxxxxxxx"

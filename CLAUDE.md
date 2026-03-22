@@ -1,415 +1,713 @@
-# CLAUDE.md — Step 4: Dockerfile + CI Workflows
+# CLAUDE.md — Step 6: Terraform Infrastructure
 
-This file provides guidance for adding the multi-stage Dockerfile and two GitHub Actions
-workflows: `ci.yml` (PR validation) and `release.yml` (build + push to Docker Hub).
+This file provides guidance for writing the Terraform configuration that provisions
+all infrastructure for Borealis: S3 remote state backend, EC2 instance, security group,
+Elastic IP, SSH key pair, IAM role for SSM, Tailscale bootstrap, and Cloudflare DNS.
 
-## Goal
+---
 
-- A single multi-stage `Dockerfile` in `docker/` that builds either binary from the
-  Cargo workspace using a build argument
-- `ci.yml` — runs on every pull request: fmt, clippy, test
-- `release.yml` — runs on push to `main` and on manual trigger: cross-compiles both
-  binaries for `aarch64-unknown-linux-gnu`, builds minimal Docker images, pushes to
-  Docker Hub tagged with both `latest` and the git SHA
+## What Each Part Does — Learning Reference
 
-No Rust code, frontend, or Terraform changes in this step.
+Before implementing, understand what each resource does and why it exists:
+
+### S3 Backend (`infra/bootstrap/`)
+Terraform needs to store a state file tracking what infrastructure it has created.
+By default this lives locally on disk (`terraform.tfstate`). The S3 backend stores it
+in an S3 bucket instead — durable, not on your laptop, never committed to git.
+A DynamoDB table provides state locking: if two `terraform apply` runs happen
+simultaneously, the lock prevents them from corrupting the state file. The bootstrap
+configuration is a separate mini-Terraform root that creates the bucket and table —
+it runs once, manually, before the main configuration is initialized.
+
+### EC2 Instance (`aws_instance`)
+The virtual machine that runs your Docker Compose stack. You're using a `t4g.small`
+— a Graviton3 arm64 instance. Graviton instances are cheaper than x86 equivalents
+and arm64 matches your Docker images (built for `linux/arm64` in the release workflow).
+The instance is configured via a `user_data` bootstrap script that runs once on first
+boot: installs Docker, installs Tailscale, joins your tailnet, and pulls your prod
+compose file.
+
+### Security Group (`aws_security_group`)
+AWS's virtual firewall for the instance. Controls what inbound and outbound traffic
+is allowed. For Borealis:
+- **Inbound 443** from Cloudflare IP ranges only — the public-facing HTTPS port.
+  No other inbound rules. Tailscale uses outbound connections so needs no inbound rule.
+- **All outbound** allowed — the instance needs to reach Docker Hub, NOAA APIs,
+  Cloudflare, and the Tailscale coordination server.
+Locking inbound 443 to Cloudflare IPs means direct access to your origin is blocked
+— all traffic must flow through Cloudflare's proxy.
+
+### Elastic IP (`aws_eip`)
+A static public IP address that stays the same even if the instance is stopped and
+restarted. Without this, EC2 assigns a random public IP on each start, which would
+break your Cloudflare DNS record. The EIP is associated with the instance and is what
+the Cloudflare DNS A record points to.
+
+### SSH Key Pair (`aws_key_pair` + `tls_private_key`)
+An RSA key pair for SSH access. Terraform generates the private key, stores it locally
+as a `.pem` file, and registers the public key with EC2. You won't use this directly
+for day-to-day access (Tailscale SSH handles that), but it's good practice to have
+it provisioned and it's needed if Tailscale ever fails.
+
+### IAM Instance Profile (`aws_iam_instance_profile`)
+An IAM role attached to the EC2 instance that grants it AWS permissions. Even though
+you're not using SSM Session Manager for access, attaching the
+`AmazonSSMManagedInstanceCore` policy is still worthwhile — it enables AWS Systems
+Manager inventory and patch management, and costs nothing. The instance profile is
+how EC2 instances assume IAM roles.
+
+### Tailscale Bootstrap (in `user_data`)
+The EC2 instance's first-boot script installs Tailscale and authenticates it to your
+tailnet using a single-use auth key. Once joined, you can SSH to the instance via its
+Tailscale IP without exposing port 22 to the internet. The auth key is consumed on
+first use and cannot be reused.
+
+### Cloudflare DNS (`cloudflare_record`)
+A DNS A record pointing `borealis.loontechnology.com` to the Elastic IP, with
+Cloudflare proxying enabled (orange cloud). This means:
+- Cloudflare terminates TLS for browsers — your origin certificate only needs to be
+  valid between Cloudflare and your EC2 instance
+- Cloudflare's IP ranges are what actually hit your EC2 security group on port 443
+- Direct connections to your EC2 IP are blocked by the security group
 
 ---
 
 ## File Structure
 
 ```
-borealis/
-├── docker/
-│   ├── Dockerfile
-│   └── docker-compose.prod.yml
-└── .github/
-    └── workflows/
-        ├── ci.yml
-        └── release.yml
+infra/
+├── bootstrap/                  # run once to create S3 state backend
+│   ├── main.tf                 # S3 bucket + DynamoDB table
+│   ├── variables.tf
+│   └── outputs.tf
+│
+├── modules/
+│   ├── ec2/
+│   │   ├── main.tf             # instance, key pair, IAM role/profile, EIP
+│   │   ├── variables.tf
+│   │   └── outputs.tf
+│   └── security/
+│       ├── main.tf             # security group, Cloudflare IP data source
+│       ├── variables.tf
+│       └── outputs.tf
+│
+├── main.tf                     # root: providers, backend, module calls
+├── variables.tf                # all input variable declarations
+├── outputs.tf                  # EIP address, instance ID, key path
+├── terraform.tfvars            # gitignored — actual values
+└── terraform.tfvars.example    # committed — documents required vars
 ```
 
 ---
 
-## `docker/Dockerfile`
+## `infra/bootstrap/main.tf`
 
-Multi-stage build. The builder stage is x86_64 but produces an aarch64 binary via
-cross-compilation. The runtime stage is a minimal arm64 image.
+This is a standalone Terraform root. Run it once with local state before initializing
+the main configuration. It creates the S3 bucket and DynamoDB table that the main
+config uses as its backend.
 
-```dockerfile
-# syntax=docker/dockerfile:1
+```hcl
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
 
-# ── Stage 1: cross-compile the binary ────────────────────────────────────────
-FROM --platform=linux/amd64 rust:latest AS builder
+provider "aws" {
+  region = "us-east-2"
+}
 
-# Install the aarch64 cross-compilation target
-RUN rustup target add aarch64-unknown-linux-gnu
+resource "aws_s3_bucket" "tfstate" {
+  bucket = "borealis-tfstate-loontechcraig"
 
-# Install the C cross-linker for aarch64
-RUN apt-get update && apt-get install -y \
-    gcc-aarch64-linux-gnu \
-    && rm -rf /var/lib/apt/lists/*
+  lifecycle {
+    prevent_destroy = true
+  }
+}
 
-# Configure cargo to use the aarch64 linker
-ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+resource "aws_s3_bucket_versioning" "tfstate" {
+  bucket = aws_s3_bucket.tfstate.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
 
-WORKDIR /app
-COPY . .
+resource "aws_s3_bucket_server_side_encryption_configuration" "tfstate" {
+  bucket = aws_s3_bucket.tfstate.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
 
-# CRATE build arg selects which binary to build (borealis-collector or borealis-api)
-ARG CRATE
-ENV SQLX_OFFLINE=true
+resource "aws_s3_bucket_public_access_block" "tfstate" {
+  bucket                  = aws_s3_bucket.tfstate.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
 
-RUN cargo build --release --target aarch64-unknown-linux-gnu -p ${CRATE}
+resource "aws_dynamodb_table" "tfstate_lock" {
+  name         = "borealis-tfstate-lock"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "LockID"
 
-# ── Stage 2: minimal arm64 runtime image ─────────────────────────────────────
-FROM --platform=linux/arm64 debian:bookworm-slim
+  attribute {
+    name = "LockID"
+    type = "S"
+  }
+}
 
-RUN apt-get update && apt-get install -y \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+output "bucket_name" {
+  value = aws_s3_bucket.tfstate.bucket
+}
 
-ARG CRATE
-COPY --from=builder /app/target/aarch64-unknown-linux-gnu/release/${CRATE} /usr/local/bin/app
-
-# frontend/ must be mounted or present at runtime for borealis-api
-# borealis-collector has no static file dependency
-
-CMD ["/usr/local/bin/app"]
+output "dynamodb_table" {
+  value = aws_dynamodb_table.tfstate_lock.name
+}
 ```
 
-### Notes on the Dockerfile
+**S3 bucket name must be globally unique.** `borealis-tfstate-loontechcraig` should
+be unique enough but AWS will error on apply if it's taken — adjust if needed.
 
-- `--platform=linux/amd64` on the builder stage ensures the builder always runs as
-  x86_64 on GitHub Actions runners regardless of the `--platform` flag passed to
-  `docker buildx build`
-- `--platform=linux/arm64` on the runtime stage produces the correct image manifest
-  for the t4g EC2 instance
-- `SQLX_OFFLINE=true` is set in the builder so sqlx uses the committed `.sqlx/` cache
-  instead of requiring a live database at build time
-- The binary name in the release stage matches the crate name exactly — confirm that
-  `cargo build -p borealis-collector` produces `target/.../borealis-collector` and
-  `cargo build -p borealis-api` produces `target/.../borealis-api`. If the binary
-  names differ from the crate names, adjust the `COPY` path accordingly by checking
-  each `Cargo.toml` for a `[[bin]]` section.
+`prevent_destroy = true` on the bucket means `terraform destroy` will refuse to delete
+it. This is intentional — you never want to accidentally destroy your state file.
 
 ---
 
-## `docker/docker-compose.prod.yml`
+## `infra/main.tf`
 
-Used on the EC2 host. Pulls pre-built images from Docker Hub rather than building
-locally. Postgres is internal-only (no host port exposed). Only the API exposes a port.
+Root configuration. Declares providers and backend, then calls modules.
 
-```yaml
-services:
-  postgres:
-    image: postgres:17
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: borealis
-      POSTGRES_USER: borealis
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    # No ports: block — intentionally internal only
+```hcl
+terraform {
+  required_version = ">= 1.6"
 
-  collector:
-    image: loontechcraig/borealis-collector:latest
-    restart: unless-stopped
-    depends_on:
-      - postgres
-    environment:
-      DATABASE_URL: postgresql://borealis:${POSTGRES_PASSWORD}@postgres:5432/borealis
-      USER_AGENT: ${USER_AGENT}
-      KP_URL: ${KP_URL}
-      BZ_URL: ${BZ_URL}
-      WIND_URL: ${WIND_URL}
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+    cloudflare = {
+      source  = "cloudflare/cloudflare"
+      version = "~> 4.0"
+    }
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
+  }
 
-  api:
-    image: loontechcraig/borealis-api:latest
-    restart: unless-stopped
-    depends_on:
-      - postgres
-    ports:
-      - "443:443"
-    volumes:
-      - ./certs:/certs:ro
-      - ./frontend:/app/frontend:ro
-    environment:
-      DATABASE_URL: postgresql://borealis:${POSTGRES_PASSWORD}@postgres:5432/borealis
-      TLS_CERT_PATH: /certs/origin.pem
-      TLS_KEY_PATH: /certs/origin.key
+  backend "s3" {
+    bucket         = "borealis-tfstate-loontechcraig"
+    key            = "borealis/terraform.tfstate"
+    region         = "us-east-2"
+    dynamodb_table = "borealis-tfstate-lock"
+    encrypt        = true
+  }
+}
 
-volumes:
-  pgdata:
+provider "aws" {
+  region = var.aws_region
+}
+
+provider "cloudflare" {
+  api_token = var.cloudflare_api_token
+}
+
+module "security" {
+  source = "./modules/security"
+
+  project_name = var.project_name
+}
+
+module "ec2" {
+  source = "./modules/ec2"
+
+  project_name       = var.project_name
+  aws_region         = var.aws_region
+  instance_type      = var.instance_type
+  ami_id             = var.ami_id
+  security_group_id  = module.security.security_group_id
+  tailscale_auth_key = var.tailscale_auth_key
+}
+
+resource "cloudflare_record" "borealis" {
+  zone_id = var.cloudflare_zone_id
+  name    = "borealis"
+  value   = module.ec2.eip_address
+  type    = "A"
+  proxied = true
+}
 ```
 
-### Notes on prod compose
-
-- `frontend/` is bind-mounted into the API container at `/app/frontend` so ServeDir
-  can find it at runtime. The working directory for the binary inside the container
-  is `/` by default — adjust the ServeDir path in `borealis-api` if needed, or add
-  `WORKDIR /app` to the Dockerfile runtime stage and ensure the binary is copied there
-- `certs/` contains the Cloudflare Origin Certificate — provisioned manually on the
-  host, never committed to the repo
-- TLS integration in the API binary is a later step — the port mapping is included
-  here for completeness but the API currently binds HTTP on 3000. Update the port
-  mapping to `"3000:3000"` until TLS is wired in, then switch to 443.
-
 ---
 
-## `.github/workflows/ci.yml`
+## `infra/variables.tf`
 
-Runs on every pull request. Validates formatting, lints, and tests. Does not build
-Docker images. Does not require Docker Hub credentials.
+```hcl
+variable "project_name" {
+  description = "Used as a prefix/tag on all resources"
+  type        = string
+  default     = "borealis"
+}
 
-```yaml
-name: CI
+variable "aws_region" {
+  description = "AWS region"
+  type        = string
+  default     = "us-east-2"
+}
 
-on:
-  pull_request:
-    branches:
-      - main
+variable "instance_type" {
+  description = "EC2 instance type — must be arm64 (t4g family)"
+  type        = string
+  default     = "t4g.small"
+}
 
-env:
-  CARGO_TERM_COLOR: always
-  SQLX_OFFLINE: "true"
+variable "ami_id" {
+  description = "arm64 AMI ID for us-east-2 — find latest Debian 12 arm64 in AWS console"
+  type        = string
+}
 
-jobs:
-  check:
-    name: Check
-    runs-on: ubuntu-latest
+variable "cloudflare_api_token" {
+  description = "Cloudflare API token with DNS edit permissions for loontechnology.com"
+  type        = string
+  sensitive   = true
+}
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+variable "cloudflare_zone_id" {
+  description = "Cloudflare zone ID for loontechnology.com"
+  type        = string
+}
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Cache cargo registry and build artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Check formatting
-        run: cargo fmt --all --check
-
-      - name: Clippy
-        run: cargo clippy --workspace -- -W warnings
-
-      - name: Test
-        run: cargo test --workspace
+variable "tailscale_auth_key" {
+  description = "Single-use Tailscale auth key for joining tailnet on first boot"
+  type        = string
+  sensitive   = true
+}
 ```
 
-### Notes on ci.yml
-
-- `dtolnay/rust-toolchain@stable` always installs the latest stable Rust — no pinned
-  version, consistent with the project's stance on always tracking stable
-- `SQLX_OFFLINE=true` must be set so sqlx compile-time query checking uses `.sqlx/`
-  cache rather than attempting a database connection
-- Cache key is based on `Cargo.lock` — cache is invalidated when dependencies change
-- Clippy uses `-W warnings` (warn but don't fail) as specified
-- No database service container needed — sqlx offline mode covers compile-time checks
-  and there are no integration tests requiring a live DB at this stage
-
 ---
 
-## `.github/workflows/release.yml`
+## `infra/terraform.tfvars.example`
 
-Runs on push to `main` and on manual trigger (`workflow_dispatch`). Cross-compiles
-both binaries for aarch64, builds arm64 Docker images, pushes to Docker Hub with
-`latest` and git SHA tags.
+Commit this file. It documents what is needed without exposing values.
 
-```yaml
-name: Release
+```hcl
+# Copy to terraform.tfvars and fill in values
+# terraform.tfvars is gitignored
 
-on:
-  push:
-    branches:
-      - main
-  workflow_dispatch:
+project_name         = "borealis"
+aws_region           = "us-east-2"
+instance_type        = "t4g.small"
 
-env:
-  CARGO_TERM_COLOR: always
-  SQLX_OFFLINE: "true"
+# Find the latest Debian 12 arm64 AMI for us-east-2:
+# AWS Console → EC2 → AMIs → Public images
+# Filter: Owner=136693071363 (Debian), Architecture=arm64, Name=debian-12-*
+ami_id               = "ami-xxxxxxxxxxxxxxxxx"
 
-jobs:
-  build-and-push:
-    name: Build and Push — ${{ matrix.crate }}
-    runs-on: ubuntu-latest
+# Cloudflare
+cloudflare_api_token = "your-cloudflare-api-token"
+cloudflare_zone_id   = "your-zone-id"
 
-    strategy:
-      matrix:
-        crate:
-          - borealis-collector
-          - borealis-api
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-gnu
-
-      - name: Cache cargo registry and build artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/
-          key: ${{ runner.os }}-cargo-aarch64-${{ matrix.crate }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-aarch64-${{ matrix.crate }}-
-
-      - name: Install aarch64 cross-linker
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-
-      - name: Configure cargo cross-linker
-        run: |
-          mkdir -p ~/.cargo
-          cat >> ~/.cargo/config.toml <<EOF
-          [target.aarch64-unknown-linux-gnu]
-          linker = "aarch64-linux-gnu-gcc"
-          EOF
-
-      - name: Build aarch64 binary
-        run: cargo build --release --target aarch64-unknown-linux-gnu -p ${{ matrix.crate }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Extract git SHA tag
-        id: sha
-        run: echo "short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/Dockerfile
-          platforms: linux/arm64
-          push: true
-          build-args: |
-            CRATE=${{ matrix.crate }}
-          tags: |
-            loontechcraig/${{ matrix.crate }}:latest
-            loontechcraig/${{ matrix.crate }}:${{ steps.sha.outputs.short }}
-          cache-from: type=gha,scope=${{ matrix.crate }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.crate }}
+# Generate at: https://login.tailscale.com/admin/settings/keys
+# Use a single-use, ephemeral key
+tailscale_auth_key   = "tskey-auth-xxxxxxxxx"
 ```
 
-### Notes on release.yml
+---
 
-- The matrix runs both crates in parallel — two jobs, two images, independent caches
-- Cross-compilation is done directly with `cargo build --target aarch64-unknown-linux-gnu`
-  rather than the `cross` tool — this avoids Docker-in-Docker complexity on the runner
-  since we're already in a Docker build context
-- `cache-from/cache-to: type=gha` uses GitHub Actions cache for Docker layer caching
-  scoped per crate — significantly speeds up subsequent builds
-- Git SHA is shortened to 7 characters via `git rev-parse --short HEAD`
-- The Dockerfile `COPY . .` in the builder stage copies the full workspace including
-  the pre-built binary in `target/` — but since we're running `cargo build` inside
-  the Dockerfile builder stage (not copying a pre-built binary), the cross-compilation
-  happens inside Docker. This is consistent and correct.
-- `workflow_dispatch` with no inputs — manual trigger requires no parameters, just
-  runs against the current HEAD of `main`
+## `infra/modules/security/main.tf`
+
+Fetches Cloudflare's published IP ranges via HTTP data sources and creates a security
+group that allows inbound 443 only from those ranges.
+
+```hcl
+# Cloudflare publishes their IP ranges at these URLs
+data "http" "cloudflare_ips_v4" {
+  url = "https://www.cloudflare.com/ips-v4"
+}
+
+data "http" "cloudflare_ips_v6" {
+  url = "https://www.cloudflare.com/ips-v6"
+}
+
+locals {
+  cloudflare_ipv4_cidrs = compact(split("\n", trimspace(data.http.cloudflare_ips_v4.response_body)))
+  cloudflare_ipv6_cidrs = compact(split("\n", trimspace(data.http.cloudflare_ips_v6.response_body)))
+}
+
+resource "aws_security_group" "borealis" {
+  name        = "${var.project_name}-sg"
+  description = "Borealis — HTTPS from Cloudflare only, all outbound"
+
+  # HTTPS inbound from Cloudflare IPv4 ranges only
+  ingress {
+    description = "HTTPS from Cloudflare IPv4"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = local.cloudflare_ipv4_cidrs
+  }
+
+  # HTTPS inbound from Cloudflare IPv6 ranges
+  ingress {
+    description      = "HTTPS from Cloudflare IPv6"
+    from_port        = 443
+    to_port          = 443
+    protocol         = "tcp"
+    ipv6_cidr_blocks = local.cloudflare_ipv6_cidrs
+  }
+
+  # All outbound allowed
+  egress {
+    from_port        = 0
+    to_port          = 0
+    protocol         = "-1"
+    cidr_blocks      = ["0.0.0.0/0"]
+    ipv6_cidr_blocks = ["::/0"]
+  }
+
+  tags = {
+    Name    = "${var.project_name}-sg"
+    Project = var.project_name
+  }
+}
+```
+
+**Why no SSH inbound rule?** Tailscale establishes outbound connections to its
+coordination server and creates an encrypted overlay network. SSH over Tailscale
+travels through that overlay — it never touches the EC2 security group. Port 22
+does not need to be open to the internet.
+
+**Why fetch Cloudflare IPs dynamically?** Cloudflare occasionally adds new IP ranges.
+Fetching them at apply time means `terraform apply` always uses the current list.
+The tradeoff is that apply requires internet access and the list can change between
+plans — acceptable for this use case.
 
 ---
 
-## GitHub Actions Secrets Required
+## `infra/modules/security/variables.tf`
 
-Add these in the repository settings under **Settings → Secrets and variables →
-Actions**:
+```hcl
+variable "project_name" {
+  type = string
+}
+```
 
-| Secret name | Value |
-|-------------|-------|
-| `DOCKERHUB_USERNAME` | `loontechcraig` |
-| `DOCKERHUB_TOKEN` | Docker Hub access token (not your password — generate at hub.docker.com → Account Settings → Security) |
+## `infra/modules/security/outputs.tf`
 
-Do not use your Docker Hub password directly. Generate a personal access token with
-Read/Write scope for the `borealis-collector` and `borealis-api` repositories.
-
----
-
-## Docker Hub Repository Setup
-
-Before the first release workflow run, create the two repositories on Docker Hub:
-
-- `loontechcraig/borealis-collector` — set to Public
-- `loontechcraig/borealis-api` — set to Public
-
-Public repositories are required for the EC2 host to pull images without credentials
-on the host. If you prefer private repositories, you will need to add Docker Hub
-credentials to the EC2 host and run `docker login` before `docker compose pull`.
+```hcl
+output "security_group_id" {
+  value = aws_security_group.borealis.id
+}
+```
 
 ---
 
-## Verification
+## `infra/modules/ec2/main.tf`
 
-### CI workflow
+```hcl
+# Generate an RSA private key
+resource "tls_private_key" "borealis" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
 
-1. Open a pull request against `main` (even a trivial change)
-2. Confirm the `CI / Check` job triggers automatically
-3. Confirm all three steps pass: fmt check, clippy, test
-4. Confirm `SQLX_OFFLINE=true` prevents any database connection attempts
+# Register the public key with EC2
+resource "aws_key_pair" "borealis" {
+  key_name   = "${var.project_name}-key"
+  public_key = tls_private_key.borealis.public_key_openssh
+}
 
-### Release workflow
+# Save the private key locally — gitignored
+resource "local_sensitive_file" "private_key" {
+  content         = tls_private_key.borealis.private_key_pem
+  filename        = "${path.module}/../../keys/${var.project_name}.pem"
+  file_permission = "0600"
+}
 
-1. Merge a PR to `main` and confirm the release workflow triggers automatically
-2. Confirm both matrix jobs run in parallel
-3. Confirm both jobs complete successfully
-4. Confirm Docker Hub shows new tags on both repositories:
-   - `loontechcraig/borealis-collector:latest`
-   - `loontechcraig/borealis-collector:<sha>`
-   - `loontechcraig/borealis-api:latest`
-   - `loontechcraig/borealis-api:<sha>`
-5. Test manual trigger: **Actions → Release → Run workflow** and confirm it runs
-   against `main` and produces updated tags
+# IAM role for the instance
+resource "aws_iam_role" "borealis" {
+  name = "${var.project_name}-role"
 
-### Local Dockerfile validation (optional but recommended)
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { Service = "ec2.amazonaws.com" }
+    }]
+  })
+}
+
+# Attach SSM managed instance core policy
+resource "aws_iam_role_policy_attachment" "ssm" {
+  role       = aws_iam_role.borealis.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_instance_profile" "borealis" {
+  name = "${var.project_name}-profile"
+  role = aws_iam_role.borealis.name
+}
+
+# EC2 instance
+resource "aws_instance" "borealis" {
+  ami                    = var.ami_id
+  instance_type          = var.instance_type
+  key_name               = aws_key_pair.borealis.key_name
+  vpc_security_group_ids = [var.security_group_id]
+  iam_instance_profile   = aws_iam_instance_profile.borealis.name
+
+  root_block_device {
+    volume_size = 20
+    volume_type = "gp3"
+    encrypted   = true
+  }
+
+  user_data = templatefile("${path.module}/user_data.sh.tpl", {
+    tailscale_auth_key = var.tailscale_auth_key
+  })
+
+  tags = {
+    Name    = var.project_name
+    Project = var.project_name
+  }
+}
+
+# Elastic IP
+resource "aws_eip" "borealis" {
+  instance = aws_instance.borealis.id
+  domain   = "vpc"
+
+  tags = {
+    Name    = "${var.project_name}-eip"
+    Project = var.project_name
+  }
+}
+```
+
+---
+
+## `infra/modules/ec2/user_data.sh.tpl`
+
+This script runs once on first boot as root. It installs Docker, installs Tailscale,
+joins your tailnet, and sets up the directory structure for the prod Docker Compose
+stack. It does not start the application — that is done manually after the Cloudflare
+Origin Certificate and `.env` are placed on the instance.
 
 ```bash
-# Build collector image locally for amd64 to verify Dockerfile syntax
-# (aarch64 cross-compile locally requires the same gcc-aarch64-linux-gnu setup)
-docker build \
-  --build-arg CRATE=borealis-collector \
-  -f docker/Dockerfile \
-  -t borealis-collector:local \
-  .
+#!/bin/bash
+set -euo pipefail
 
-docker build \
-  --build-arg CRATE=borealis-api \
-  -f docker/Dockerfile \
-  -t borealis-api:local \
-  .
+# ── System update ─────────────────────────────────────────────────────────────
+apt-get update
+apt-get upgrade -y
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+apt-get install -y ca-certificates curl gnupg
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  https://download.docker.com/linux/debian \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+systemctl enable docker
+systemctl start docker
+
+# ── Tailscale ─────────────────────────────────────────────────────────────────
+curl -fsSL https://tailscale.com/install.sh | sh
+tailscale up --authkey="${tailscale_auth_key}" --ssh
+
+# ── Application directory structure ───────────────────────────────────────────
+mkdir -p /opt/borealis/certs
+
+# Placeholder .env — operator must fill this in before starting the stack
+cat > /opt/borealis/.env.example <<'EOF'
+POSTGRES_PASSWORD=
+USER_AGENT=borealis/1.0
+KP_URL=https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json
+BZ_URL=https://services.swpc.noaa.gov/products/solar-wind/mag-1-day.json
+WIND_URL=https://services.swpc.noaa.gov/products/solar-wind/plasma-1-day.json
+EOF
+
+echo "Bootstrap complete. Next steps:"
+echo "  1. Copy docker-compose.prod.yml to /opt/borealis/docker-compose.yml"
+echo "  3. Place Cloudflare Origin Cert at /opt/borealis/certs/origin.pem"
+echo "  4. Place Cloudflare Origin Key at /opt/borealis/certs/origin.key"
+echo "  5. Create /opt/borealis/.env from .env.example"
+echo "  6. Run: cd /opt/borealis && docker compose pull && docker compose up -d"
+```
+
+`--ssh` on the `tailscale up` command enables Tailscale SSH — this allows you to SSH
+to the instance via its Tailscale IP using your existing Tailscale identity without
+managing SSH keys manually. The EC2 key pair is a fallback only.
+
+---
+
+## `infra/modules/ec2/variables.tf`
+
+```hcl
+variable "project_name" { type = string }
+variable "aws_region"   { type = string }
+variable "instance_type" { type = string }
+variable "ami_id"        { type = string }
+variable "security_group_id" { type = string }
+variable "tailscale_auth_key" {
+  type      = string
+  sensitive = true
+}
+```
+
+## `infra/modules/ec2/outputs.tf`
+
+```hcl
+output "eip_address" {
+  value       = aws_eip.borealis.public_ip
+  description = "Public IP of the Borealis EC2 instance — used for Cloudflare DNS"
+}
+
+output "instance_id" {
+  value = aws_instance.borealis.id
+}
+
+output "key_path" {
+  value       = local_sensitive_file.private_key.filename
+  description = "Path to the generated SSH private key (fallback access)"
+}
+```
+
+## `infra/outputs.tf`
+
+```hcl
+output "eip_address" {
+  value       = module.ec2.eip_address
+  description = "Point your Cloudflare DNS A record here"
+}
+
+output "instance_id" {
+  value = module.ec2.instance_id
+}
+
+output "dns_record" {
+  value = "borealis.loontechnology.com → ${module.ec2.eip_address}"
+}
 ```
 
 ---
 
-## What Is NOT Changing in This Step
+## Finding the arm64 AMI ID
 
-- No Rust code changes
-- No frontend changes
-- No Terraform
-- EC2 deployment and TLS are handled in later steps
-- The `docker-compose.yml` (local dev, Postgres only) is not modified
+Before filling in `terraform.tfvars`, find the current Debian 12 arm64 AMI for
+`us-east-2`:
+
+```bash
+aws ec2 describe-images \
+  --region us-east-2 \
+  --owners 136693071363 \
+  --filters \
+    "Name=name,Values=debian-12-arm64-*" \
+    "Name=architecture,Values=arm64" \
+    "Name=state,Values=available" \
+  --query 'sort_by(Images, &CreationDate)[-1].ImageId' \
+  --output text
+```
+
+Owner `136693071363` is the official Debian AWS account. Use the most recent image
+returned.
+
+---
+
+## Execution Order
+
+### Step A — Bootstrap (run once)
+
+```bash
+cd infra/bootstrap
+terraform init
+terraform apply
+# Note the bucket_name and dynamodb_table outputs
+```
+
+### Step B — Main configuration
+
+```bash
+cd infra
+
+# Initialize with S3 backend
+terraform init
+
+# Review what will be created
+terraform plan
+
+# Apply
+terraform apply
+```
+
+### Step C — Verify
+
+```bash
+# Confirm outputs
+terraform output
+
+# Confirm DNS record exists in Cloudflare dashboard
+# Confirm instance appears in AWS EC2 console
+# Confirm EIP is associated with the instance
+# Confirm instance appears in your Tailscale admin console
+#   (https://login.tailscale.com/admin/machines)
+
+# SSH via Tailscale (once instance is in your tailnet)
+ssh admin@<tailscale-ip>
+```
+
+---
+
+## `terraform.tfvars` (gitignored, you create this)
+
+```hcl
+ami_id               = "ami-xxxxxxxxxxxxxxxxx"   # from AWS CLI command above
+cloudflare_api_token = "your-cloudflare-api-token"
+cloudflare_zone_id   = "your-zone-id"
+tailscale_auth_key   = "tskey-auth-xxxxxxxxx"
+```
+
+---
+
+## Verification Checklist
+
+- [ ] `terraform init` succeeds in `infra/bootstrap/` — providers download cleanly
+- [ ] `terraform apply` in bootstrap creates S3 bucket and DynamoDB table
+- [ ] `terraform init` succeeds in `infra/` — connects to S3 backend
+- [ ] `terraform plan` shows expected resources with no errors
+- [ ] `terraform apply` completes with no errors
+- [ ] EC2 instance visible in AWS console, running, arm64 architecture
+- [ ] EIP associated with instance in AWS console
+- [ ] `terraform output eip_address` matches the EIP in AWS console
+- [ ] DNS A record `borealis.loontechnology.com` visible in Cloudflare dashboard
+      pointing to EIP, proxied (orange cloud)
+- [ ] Instance appears in Tailscale admin console within ~2 minutes of boot
+- [ ] SSH via Tailscale works: `ssh admin@<tailscale-ip>`
+- [ ] Docker is running on the instance: `docker ps` returns without error
+- [ ] Security group has no inbound rules except 443 from Cloudflare IP ranges
+
+---
+
+## What Is NOT In This Step
+
+- TLS / Cloudflare Origin Certificate — wired into the API binary in Step 7
+- Docker Compose stack startup — done manually after certs and `.env` are placed
+- GitHub Actions deploy trigger — added in Step 8
+- No Rust, frontend, or CI changes
