@@ -6,6 +6,7 @@
 # === Claude Settings ===
 /.claude/
 /.claude
+CLAUDE.md
 
 # === Example JSON Files ===
 /examples/
