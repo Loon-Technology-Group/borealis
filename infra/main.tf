@@ -33,10 +33,18 @@ provider "cloudflare" {
   api_token = var.cloudflare_api_token
 }
 
+module "network" {
+  source = "./modules/network"
+
+  project_name = var.project_name
+  vpc_cidr     = var.vpc_cidr
+}
+
 module "security" {
   source = "./modules/security"
 
   project_name = var.project_name
+  vpc_id       = module.network.vpc_id
 }
 
 module "ec2" {
@@ -46,6 +54,7 @@ module "ec2" {
   aws_region         = var.aws_region
   instance_type      = var.instance_type
   ami_id             = var.ami_id
+  subnet_id          = module.network.subnet_id
   security_group_id  = module.security.security_group_id
   tailscale_auth_key = var.tailscale_auth_key
 }

@@ -15,6 +15,7 @@ locals {
 resource "aws_security_group" "borealis" {
   name        = "${var.project_name}-sg"
   description = "Borealis — HTTPS from Cloudflare only, all outbound"
+  vpc_id      = var.vpc_id
 
   # HTTPS inbound from Cloudflare IPv4 ranges only
   ingress {

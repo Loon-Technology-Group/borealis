@@ -10,6 +10,12 @@ variable "aws_region" {
   default     = "us-east-2"
 }
 
+variable "vpc_cidr" {
+  description = "CIDR block for the Borealis VPC"
+  type        = string
+  default     = "10.1.1.0/24"
+}
+
 variable "instance_type" {
   description = "EC2 instance type — must be arm64 (t4g family)"
   type        = string
