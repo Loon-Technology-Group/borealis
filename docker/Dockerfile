@@ -31,8 +31,6 @@ WORKDIR /app
 
 ARG CRATE
 COPY --from=builder /app/target/aarch64-unknown-linux-gnu/release/${CRATE} /usr/local/bin/app
-
-# frontend/ must be mounted at /app/frontend at runtime for borealis-api (ServeDir)
-# borealis-collector has no static file dependency
+COPY --from=builder /app/frontend /app/frontend
 
 CMD ["/usr/local/bin/app"]

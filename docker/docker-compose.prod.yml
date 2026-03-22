@@ -31,7 +31,6 @@ services:
       - "3000:3000"  # Update to 443:443 once TLS is wired in
     volumes:
       - ./certs:/certs:ro
-      - ./frontend:/app/frontend:ro
     environment:
       DATABASE_URL: postgresql://borealis:${POSTGRES_PASSWORD}@postgres:5432/borealis
       TLS_CERT_PATH: /certs/origin.pem
