@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ── Stage 1: cross-compile the binary ────────────────────────────────────────
-FROM --platform=linux/amd64 rust:latest AS builder
+FROM --platform=linux/amd64 rust:bookworm AS builder
 
 RUN rustup target add aarch64-unknown-linux-gnu
 
