@@ -51,7 +51,7 @@
   }
 
   function initTheme() {
-    var saved = localStorage.getItem("borealis-theme") || "dark";
+    var saved = localStorage.getItem("borealis-theme") || "light";
     document.documentElement.setAttribute("data-theme", saved);
   }
 
