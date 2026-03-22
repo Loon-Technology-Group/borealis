@@ -156,7 +156,7 @@
   // ── 5. Chart Construction ───────────────────────────────
 
   var state = {
-    window: "6h",
+    window: "3h",
     kpData: null,
     bzData: null,
     windData: null,
