@@ -628,17 +628,19 @@
 
     fetchAll(state.window)
       .then(function (data) {
-        renderStatus(data.latest);
         state.kpData = data.kp;
         state.bzData = data.bz;
         state.windData = data.wind;
+        renderStatus(data.latest);
         buildAllCharts();
       })
       .catch(function (err) {
         console.error("Initial data load failed:", err);
-        showChartError("chart-kp-container", "Unable to load data");
-        showChartError("chart-bz-container", "Unable to load data");
-        showChartError("chart-wind-container", "Unable to load data");
+        if (!state.kpData) {
+          showChartError("chart-kp-container", "Unable to load data");
+          showChartError("chart-bz-container", "Unable to load data");
+          showChartError("chart-wind-container", "Unable to load data");
+        }
       });
 
     var savedRefresh = localStorage.getItem("borealis-autorefresh");
