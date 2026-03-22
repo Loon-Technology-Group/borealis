@@ -625,8 +625,10 @@
         state.kpData = data.kp;
         state.bzData = data.bz;
         state.windData = data.wind;
-        buildAllCharts();
-        setupResizeObservers();
+        requestAnimationFrame(function () {
+          buildAllCharts();
+          setupResizeObservers();
+        });
       })
       .catch(function (err) {
         console.error("Initial data load failed:", err);
