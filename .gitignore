@@ -13,6 +13,18 @@
 # === ENV ===
 *.env
 
+# === Keys ===
+infra/keys/*
+!infra/keys/.gitkeep
+*.pem
+
+# === Terraform ===
+terraform.tfvars
+infra/**/.terraform/
+infra/**/*.tfstate
+infra/**/*.tfstate.backup
+**/.terraform.lock.hcl
+
 # === Dependency cache (optional) ===
 /.cargo/
 /vendor/
