@@ -28,11 +28,12 @@ services:
     depends_on:
       - postgres
     ports:
-      - "3000:3000"  # Update to 443:443 once TLS is wired in
+      - "443:443"
     volumes:
-      - ./certs:/certs:ro
+      - /opt/borealis/certs:/certs:ro
     environment:
       DATABASE_URL: postgresql://borealis:${POSTGRES_PASSWORD}@postgres:5432/borealis
+      SKIP_TLS: "false"
       TLS_CERT_PATH: /certs/origin.pem
       TLS_KEY_PATH: /certs/origin.key
 
