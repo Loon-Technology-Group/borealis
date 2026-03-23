@@ -274,8 +274,32 @@ header {
 /* ── Responsive ──────────────────────────────────────── */
 
 @media (max-width: 768px) {
+    body {
+        height: auto;
+        min-height: 100vh;
+        overflow: auto;
+    }
+
     .chart-grid {
         grid-template-columns: 1fr;
+        grid-template-rows: auto;
+        flex: none;
+        overflow: visible;
+    }
+
+    .chart-column-right {
+        overflow: visible;
+    }
+
+    .chart-panel {
+        min-height: 280px;
+        overflow: visible;
+    }
+
+    #chart-kp-container,
+    #chart-bz-container,
+    #chart-wind-container {
+        min-height: 240px;
     }
 
     header {

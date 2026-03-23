@@ -622,8 +622,6 @@
     var bzEl = document.getElementById("chart-bz-container");
     var windEl = document.getElementById("chart-wind-container");
 
-    if (kpEl.clientWidth === 0 || kpEl.clientHeight === 0) return false;
-
     if (state.kpData && state.kpData.length > 0) {
       renderKpChart(kpEl, state.kpData);
     } else {
@@ -743,12 +741,15 @@
 
   function setupResizeObservers() {
     var lastWidth = 0;
+    var lastHeight = 0;
     var resizeTimer = null;
     var grid = document.querySelector(".chart-grid");
     new ResizeObserver(function () {
       var w = grid.clientWidth;
-      if (w === lastWidth) return;
+      var h = grid.clientHeight;
+      if (w === lastWidth && h === lastHeight) return;
       lastWidth = w;
+      lastHeight = h;
       if (resizeTimer) clearTimeout(resizeTimer);
       resizeTimer = setTimeout(function () {
         if (state.kpData) buildAllCharts();
