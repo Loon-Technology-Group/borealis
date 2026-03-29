@@ -525,8 +525,8 @@
     // ensure 0 is in range
     if (min > 0) min = 0;
     if (max < 0) max = 0;
-    // add a small padding
-    var pad = (max - min) * 0.1 || 1;
+    // add padding so data doesn't touch axis edges
+    var pad = Math.max((max - min) * 0.15, 2);
     min -= pad;
     max += pad;
 
@@ -572,7 +572,7 @@
       if (speeds[i] < sMin) sMin = speeds[i];
       if (speeds[i] > sMax) sMax = speeds[i];
     }
-    var sPad = (sMax - sMin) * 0.1 || 10;
+    var sPad = Math.max((sMax - sMin) * 0.15, 10);
     sMin = Math.max(0, sMin - sPad);
     sMax += sPad;
     var sTicks = generateValueTicks(sMin, sMax, 5);
@@ -586,7 +586,7 @@
       if (densities[j] < dMin) dMin = densities[j];
       if (densities[j] > dMax) dMax = densities[j];
     }
-    var dPad = (dMax - dMin) * 0.1 || 1;
+    var dPad = Math.max((dMax - dMin) * 0.15, 1);
     dMin = Math.max(0, dMin - dPad);
     dMax += dPad;
     var dTicks = generateValueTicks(dMin, dMax, 5);
