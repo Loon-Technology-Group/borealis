@@ -39,7 +39,7 @@ services:
       DATABASE_URL: postgresql://borealis:${POSTGRES_PASSWORD}@postgres:5432/borealis
       USER_AGENT: borealis/1.0
       KP_URL: https://services.swpc.noaa.gov/json/planetary_k_index_1m.json
-      WIND_URL: https://services.swpc.noaa.gov/products/solar-wind/plasma-5-minute.json
+      WIND_URL: https://services.swpc.noaa.gov/products/geospace/propagated-solar-wind.json
       BZ_URL: https://services.swpc.noaa.gov/json/dscovr/dscovr_mag_1s.json
 
   api:

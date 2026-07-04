@@ -5,6 +5,7 @@ use crate::models::{Bz, BzReading, Kp, KpReading, Wind, WindReading};
 
 fn parse_timestamp(s: &str) -> Option<NaiveDateTime> {
     NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
+        .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%SZ"))
         .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f"))
         .ok()
 }
@@ -139,4 +140,24 @@ pub async fn get_latest_wind(pool: &PgPool) -> Result<Option<WindReading>, sqlx:
     )
     .fetch_optional(pool)
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_bz_style_timestamp() {
+        assert!(parse_timestamp("2026-02-18T04:18:08").is_some());
+    }
+
+    #[test]
+    fn parses_wind_style_zulu_timestamp() {
+        assert!(parse_timestamp("2026-06-27T14:27:00Z").is_some());
+    }
+
+    #[test]
+    fn parses_legacy_space_separated_timestamp() {
+        assert!(parse_timestamp("2026-02-18 04:24:00.000").is_some());
+    }
 }

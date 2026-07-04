@@ -105,7 +105,7 @@ async fn fetch_and_store_bz(client: &reqwest::Client, pool: &PgPool, url: &str) 
 
 async fn fetch_and_store_wind(client: &reqwest::Client, pool: &PgPool, url: &str) {
     let raw = match client.get(url).send().await {
-        Ok(resp) => match resp.json::<Vec<Vec<String>>>().await {
+        Ok(resp) => match resp.json::<Vec<Vec<serde_json::Value>>>().await {
             Ok(data) => data,
             Err(e) => {
                 error!(error = %e, "Failed to parse wind data");
@@ -118,10 +118,18 @@ async fn fetch_and_store_wind(client: &reqwest::Client, pool: &PgPool, url: &str
         }
     };
 
-    let records: Vec<Wind> = raw
+    let Some((header, rows)) = raw.split_first() else {
+        warn!("wind data response had no rows");
+        return;
+    };
+    let header: Vec<String> = header
         .iter()
-        .skip(1)
-        .filter_map(|row| Wind::from_row(row))
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+
+    let records: Vec<Wind> = rows
+        .iter()
+        .filter_map(|row| Wind::from_row(&header, row))
         .collect();
 
     if let Err(e) = db::insert_wind(pool, &records).await {
