@@ -111,7 +111,7 @@
     }
 
     if (latest.bz) {
-      var bzVal = latest.bz.bz_gsm;
+      var bzVal = latest.bz.bz;
       var dir = bzVal >= 0 ? "Northward" : "Southward";
       var arrow = bzVal >= 0 ? "\u2191" : "\u2193";
       var bzColor =
@@ -514,7 +514,7 @@
     var p = layout.plot;
 
     var times = extractTimesMs(data);
-    var values = extractField(data, "bz_gsm");
+    var values = extractField(data, "bz");
 
     var min = Infinity, max = -Infinity;
     for (var i = 0; i < values.length; i++) {
@@ -531,9 +531,10 @@
     max += pad;
 
     var yTicks = generateValueTicks(min, max, 5);
-    // extend scale to cover tick range
-    var scaleMin = yTicks[0];
-    var scaleMax = yTicks[yTicks.length - 1];
+    // ticks snap to "nice" round numbers and can fall short of the padded
+    // min/max, so widen the scale to guarantee the full data range fits
+    var scaleMin = Math.min(yTicks[0], min);
+    var scaleMax = Math.max(yTicks[yTicks.length - 1], max);
 
     var xTicks = generateTimeTicks(times[0], times[times.length - 1], 6);
     var xMin = Math.min(times[0], xTicks[0] || times[0]);
