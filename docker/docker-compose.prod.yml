@@ -19,7 +19,6 @@ services:
       DATABASE_URL: postgresql://borealis:${POSTGRES_PASSWORD}@postgres:5432/borealis
       USER_AGENT: ${USER_AGENT}
       KP_URL: ${KP_URL}
-      BZ_URL: ${BZ_URL}
       WIND_URL: ${WIND_URL}
 
   api:

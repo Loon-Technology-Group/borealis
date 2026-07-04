@@ -38,7 +38,6 @@ async fn main() {
         .expect("failed to build reqwest client");
 
     let kp_url = std::env::var("KP_URL").expect("KP_URL must be set");
-    let bz_url = std::env::var("BZ_URL").expect("BZ_URL must be set");
     let wind_url = std::env::var("WIND_URL").expect("WIND_URL must be set");
 
     let shutdown = shutdown_signal();
@@ -46,8 +45,7 @@ async fn main() {
 
     loop {
         fetch_and_store_kp(&client, &pool, &kp_url).await;
-        fetch_and_store_bz(&client, &pool, &bz_url).await;
-        fetch_and_store_wind(&client, &pool, &wind_url).await;
+        fetch_and_store_wind_and_bz(&client, &pool, &wind_url).await;
 
         tokio::select! {
             _ = sleep(Duration::from_secs(60)) => {},
@@ -81,45 +79,23 @@ async fn fetch_and_store_kp(client: &reqwest::Client, pool: &PgPool, url: &str) 
     }
 }
 
-async fn fetch_and_store_bz(client: &reqwest::Client, pool: &PgPool, url: &str) {
-    let records = match client.get(url).send().await {
-        Ok(resp) => match resp.json::<Vec<Bz>>().await {
-            Ok(data) => data,
-            Err(e) => {
-                error!(error = %e, "Failed to parse bz data");
-                return;
-            }
-        },
-        Err(e) => {
-            error!(error = %e, "Failed to fetch bz data");
-            return;
-        }
-    };
-
-    if let Err(e) = db::insert_bz(pool, &records).await {
-        error!(error = %e, "Failed to insert bz data");
-    } else {
-        info!(count = records.len(), "Inserted bz records");
-    }
-}
-
-async fn fetch_and_store_wind(client: &reqwest::Client, pool: &PgPool, url: &str) {
+async fn fetch_and_store_wind_and_bz(client: &reqwest::Client, pool: &PgPool, url: &str) {
     let raw = match client.get(url).send().await {
         Ok(resp) => match resp.json::<Vec<Vec<serde_json::Value>>>().await {
             Ok(data) => data,
             Err(e) => {
-                error!(error = %e, "Failed to parse wind data");
+                error!(error = %e, "Failed to parse wind/bz data");
                 return;
             }
         },
         Err(e) => {
-            error!(error = %e, "Failed to fetch wind data");
+            error!(error = %e, "Failed to fetch wind/bz data");
             return;
         }
     };
 
     let Some((header, rows)) = raw.split_first() else {
-        warn!("wind data response had no rows");
+        warn!("wind/bz data response had no rows");
         return;
     };
     let header: Vec<String> = header
@@ -127,15 +103,24 @@ async fn fetch_and_store_wind(client: &reqwest::Client, pool: &PgPool, url: &str
         .filter_map(|v| v.as_str().map(str::to_string))
         .collect();
 
-    let records: Vec<Wind> = rows
+    let wind_records: Vec<Wind> = rows
         .iter()
         .filter_map(|row| Wind::from_row(&header, row))
         .collect();
-
-    if let Err(e) = db::insert_wind(pool, &records).await {
+    if let Err(e) = db::insert_wind(pool, &wind_records).await {
         error!(error = %e, "Failed to insert wind data");
     } else {
-        info!(count = records.len(), "Inserted wind records");
+        info!(count = wind_records.len(), "Inserted wind records");
+    }
+
+    let bz_records: Vec<Bz> = rows
+        .iter()
+        .filter_map(|row| Bz::from_row(&header, row))
+        .collect();
+    if let Err(e) = db::insert_bz(pool, &bz_records).await {
+        error!(error = %e, "Failed to insert bz data");
+    } else {
+        info!(count = bz_records.len(), "Inserted bz records");
     }
 }
 

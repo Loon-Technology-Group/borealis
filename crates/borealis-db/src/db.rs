@@ -34,22 +34,15 @@ pub async fn insert_bz(pool: &PgPool, records: &[Bz]) -> Result<(), sqlx::Error>
             continue;
         };
         sqlx::query(
-            "INSERT INTO bz (time_tag, bt, bx_gse, by_gse, bz_gse, theta_gse, phi_gse, bx_gsm, by_gsm, bz_gsm, theta_gsm, phi_gsm)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            "INSERT INTO bz (time_tag, bt, bx, by, bz)
+             VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT (time_tag) DO NOTHING",
         )
         .bind(time_tag)
         .bind(record.bt)
-        .bind(record.bx_gse)
-        .bind(record.by_gse)
-        .bind(record.bz_gse)
-        .bind(record.theta_gse)
-        .bind(record.phi_gse)
-        .bind(record.bx_gsm)
-        .bind(record.by_gsm)
-        .bind(record.bz_gsm)
-        .bind(record.theta_gsm)
-        .bind(record.phi_gsm)
+        .bind(record.bx)
+        .bind(record.by)
+        .bind(record.bz)
         .execute(pool)
         .await?;
     }
@@ -91,9 +84,7 @@ pub async fn get_kp(pool: &PgPool, hours: i64) -> Result<Vec<KpReading>, sqlx::E
 
 pub async fn get_bz(pool: &PgPool, hours: i64) -> Result<Vec<BzReading>, sqlx::Error> {
     sqlx::query_as::<_, BzReading>(
-        "SELECT time_tag, bt, bx_gse, by_gse, bz_gse, theta_gse, phi_gse,
-                bx_gsm, by_gsm, bz_gsm, theta_gsm, phi_gsm
-         FROM bz
+        "SELECT time_tag, bt, bx, by, bz FROM bz
          WHERE time_tag >= NOW() - ($1 * INTERVAL '1 hour')
          ORDER BY time_tag ASC",
     )
@@ -125,9 +116,7 @@ pub async fn get_latest_kp(pool: &PgPool) -> Result<Option<KpReading>, sqlx::Err
 
 pub async fn get_latest_bz(pool: &PgPool) -> Result<Option<BzReading>, sqlx::Error> {
     sqlx::query_as::<_, BzReading>(
-        "SELECT time_tag, bt, bx_gse, by_gse, bz_gse, theta_gse, phi_gse,
-                bx_gsm, by_gsm, bz_gsm, theta_gsm, phi_gsm
-         FROM bz ORDER BY time_tag DESC LIMIT 1",
+        "SELECT time_tag, bt, bx, by, bz FROM bz ORDER BY time_tag DESC LIMIT 1",
     )
     .fetch_optional(pool)
     .await
