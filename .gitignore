@@ -3,10 +3,11 @@
 /target
 **/*.rs.bk               # Backup files
 
-# === Claude Settings ===
+# === Agent Settings ===
 /.claude/
 /.claude
 CLAUDE.md
+AGENTS.md
 
 # === Example JSON Files ===
 /examples/
